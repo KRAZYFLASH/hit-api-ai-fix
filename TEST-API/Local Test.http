@@ -1,0 +1,27 @@
+POST http://localhost:8003/api/stream/live
+Content-Type: application/json
+Accept: text/event-stream
+
+{
+  "input":{
+    "messages": [
+      {
+        "content": [
+          {
+            "type": "text",
+            "text": "Dimana saya bisa melakukan transfer bank bni ?"
+          }
+        ],
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "type": "human",
+        "name": null,
+        "id": null,
+        "example": false
+      }
+    ],
+    "user_id": "USERCISO",
+    "session_id": "c090366e-9c04-41c4-ace6-f4xa56264097",
+    "divisi_type": "divisi"
+  }
+}
