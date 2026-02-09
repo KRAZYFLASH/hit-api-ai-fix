@@ -73,33 +73,30 @@ public class StreamServiceImpl implements StreamService {
                 .subscribeOn(Schedulers.boundedElastic())
                 .cache();
 
-        // 2) check existing conversation if session_id provided
-        Mono<Conversation> convoIfExistsMono = userMono.flatMap(user ->
-                        Mono.fromCallable(() -> {
-                                    if (initialSessionId != null && !initialSessionId.isBlank()) {
-                                        return conversationRepository.findByUserAndSessionId(user, initialSessionId).orElse(null);
-                                    }
-                                    return null;
-                                })
-                                .subscribeOn(Schedulers.boundedElastic())
-                )
-                .cache();
-
-        // 3) preSave user msg ONLY if convo exists
-        Mono<Void> preSave = userMono.zipWith(convoIfExistsMono)
-                .flatMap(tuple -> Mono.fromCallable(() -> {
-                    Conversation convo = tuple.getT2();
-                    if (convo != null) {
-                        convoExistedAtStart.set(true);
-
-                        sessionIdRef.set(convo.getSessionId());
-                        convoPkRef.set(convo.getId());
-
-                        persistence.saveUserMessage(convo, question);
+        // 2) Load or Create conversation immediately
+        Mono<Conversation> convoMono = userMono.flatMap(user ->
+                Mono.fromCallable(() -> {
+                    String sid = initialSessionId;
+                    if (sid == null || sid.isBlank()) {
+                        sid = "sess-" + System.currentTimeMillis() + "-" + ThreadLocalRandom.current().nextInt(1000, 10000);
                     }
+                    sessionIdRef.set(sid);
+                    Conversation convo = persistence.ensureConversation(user, sid, titleFromQuestion(question));
+                    convoPkRef.set(convo.getId());
+                    return convo;
+                }).subscribeOn(Schedulers.boundedElastic())
+        ).cache();
+
+        // 3) Save User Message & Create Assistant Placeholder
+        Mono<Void> contextInitMono = convoMono.flatMap(convo ->
+                Mono.fromCallable(() -> {
+                    persistence.saveUserMessage(convo, question);
+                    Message placeholder = persistence.createAssistantPlaceholder(convo);
+                    assistantMsgPkRef.set(placeholder.getId());
+                    ctxInit.set(true);
                     return (Void) null;
-                }).subscribeOn(Schedulers.boundedElastic()))
-                .then();
+                }).subscribeOn(Schedulers.boundedElastic())
+        ).then();
 
         // 4) streaming upstream -> SSE
         Flux<ServerSentEvent<ChatEvent>> upstreamSse =
@@ -134,26 +131,12 @@ public class StreamServiceImpl implements StreamService {
                             if (runId != null && !runId.isBlank()) runIdRef.compareAndSet(null, runId);
 
                             if ("metadata".equals(event)) {
-                                Mono<Void> initMono = userMono.zipWith(convoIfExistsMono)
-                                        .flatMap(tuple -> ensureContextOnce(
-                                                ctxInit,
-                                                tuple.getT1(),
-                                                tuple.getT2(),
-                                                convoExistedAtStart.get(),
-                                                question,
-                                                sessionIdRef,
-                                                convoPkRef,
-                                                assistantMsgPkRef
-                                        ));
-
-                                return initMono.thenMany(Flux.defer(() -> {
-                                    if (metaEmitted.compareAndSet(false, true)) {
-                                        return Flux.just(sse("metadata", ChatEvent.metadata(
-                                                sessionIdRef.get(), convoPkRef.get(), assistantMsgPkRef.get(), runIdRef.get()
-                                        )));
-                                    }
-                                    return Flux.empty();
-                                }));
+                                if (metaEmitted.compareAndSet(false, true)) {
+                                    return Flux.just(sse("metadata", ChatEvent.metadata(
+                                            sessionIdRef.get(), convoPkRef.get(), assistantMsgPkRef.get(), runIdRef.get()
+                                    )));
+                                }
+                                return Flux.empty();
                             }
 
                             // upstream kamu utama: on_chat_model_stream
@@ -164,49 +147,33 @@ public class StreamServiceImpl implements StreamService {
                             String delta = root.path("data").path("chunk").path("content").asText("");
                             if (delta == null || delta.isBlank()) return Flux.empty();
 
-                            // ensure context once, AFTER first chunk arrives (because run_id exists here)
-                            Mono<Void> initMono = userMono.zipWith(convoIfExistsMono)
-                                    .flatMap(tuple -> ensureContextOnce(
-                                            ctxInit,
-                                            tuple.getT1(),              // user
-                                            tuple.getT2(),              // existing convo (nullable)
-                                            convoExistedAtStart.get(),  // existed from pre-check?
-                                            question,
-                                            sessionIdRef,
-                                            convoPkRef,
-                                            assistantMsgPkRef
-                                    ));
+                            Flux<ServerSentEvent<ChatEvent>> meta = Flux.empty();
+                            if (metaEmitted.compareAndSet(false, true)) {
+                                meta = Flux.just(sse("metadata", ChatEvent.metadata(
+                                        sessionIdRef.get(), convoPkRef.get(), assistantMsgPkRef.get(), runIdRef.get()
+                                )));
+                            }
 
-                            return initMono.thenMany(Flux.defer(() -> {
+                            // buffer append with limit
+                            if (!truncated.get()) {
+                                StringBuilder sb = bufRef.get();
+                                int remaining = MAX_BUFFER_CHARS - sb.length();
+                                if (remaining > 0) {
+                                    if (delta.length() <= remaining) sb.append(delta);
+                                    else {
+                                        sb.append(delta, 0, remaining);
+                                        truncated.set(true);
+                                    }
+                                } else truncated.set(true);
+                            }
 
-                                Flux<ServerSentEvent<ChatEvent>> meta = Flux.empty();
-                                if (metaEmitted.compareAndSet(false, true)) {
-                                    meta = Flux.just(sse("metadata", ChatEvent.metadata(
-                                            sessionIdRef.get(), convoPkRef.get(), assistantMsgPkRef.get(), runIdRef.get()
-                                    )));
-                                }
+                            Flux<ServerSentEvent<ChatEvent>> chunk = Flux.just(
+                                    sse("chunk", ChatEvent.chunk(
+                                            sessionIdRef.get(), convoPkRef.get(), assistantMsgPkRef.get(), runIdRef.get(), delta
+                                    ))
+                            );
 
-                                // buffer append with limit
-                                if (!truncated.get()) {
-                                    StringBuilder sb = bufRef.get();
-                                    int remaining = MAX_BUFFER_CHARS - sb.length();
-                                    if (remaining > 0) {
-                                        if (delta.length() <= remaining) sb.append(delta);
-                                        else {
-                                            sb.append(delta, 0, remaining);
-                                            truncated.set(true);
-                                        }
-                                    } else truncated.set(true);
-                                }
-
-                                Flux<ServerSentEvent<ChatEvent>> chunk = Flux.just(
-                                        sse("chunk", ChatEvent.chunk(
-                                                sessionIdRef.get(), convoPkRef.get(), assistantMsgPkRef.get(), runIdRef.get(), delta
-                                        ))
-                                );
-
-                                return Flux.concat(meta, chunk);
-                            }));
+                            return Flux.concat(meta, chunk);
                         })
                         .onErrorResume(err -> Flux.just(
                                 sse("error", ChatEvent.error(
@@ -218,76 +185,26 @@ public class StreamServiceImpl implements StreamService {
         // 5) finalize assistant at end
         Flux<ServerSentEvent<ChatEvent>> finalize =
                 Mono.fromCallable(() -> {
-                            Long asstId = assistantMsgPkRef.get();
-                            if (asstId != null) {
-                                String finalText = bufRef.get().toString();
-                                if (truncated.get()) finalText = finalText + "\n\n[TRUNCATED]";
-                                persistence.finalizeAssistantMessage(asstId, finalText);
-                            }
-                            return sse("done", ChatEvent.done(
-                                    sessionIdRef.get(), convoPkRef.get(), assistantMsgPkRef.get(), runIdRef.get()
-                            ));
-                        })
-                        .subscribeOn(Schedulers.boundedElastic())
-                        .flux();
+                    Long asstId = assistantMsgPkRef.get();
+                    if (asstId != null) {
+                        String finalText = bufRef.get().toString();
+                        if (truncated.get()) finalText = finalText + "\n\n[TRUNCATED]";
+                        persistence.finalizeAssistantMessage(asstId, finalText);
+                    }
+                    return sse("done", ChatEvent.done(
+                            sessionIdRef.get(), convoPkRef.get(), assistantMsgPkRef.get(), runIdRef.get()
+                    ));
+                })
+                .subscribeOn(Schedulers.boundedElastic())
+                .flux();
 
-        return preSave
+        return contextInitMono
                 .thenMany(upstreamSse.concatWith(finalize))
                 .doFinally(sig -> {
                     if (sig == reactor.core.publisher.SignalType.CANCEL) {
                         log.warn("Client disconnected. sessionId={}, runId={}", sessionIdRef.get(), runIdRef.get());
                     }
                 });
-    }
-
-    /**
-     * init context exactly once:
-     * - decide sessionId final (prefer request.session_id, else generate)
-     * - ensure conversation exists
-     * - if conversation did NOT exist at start, save user message now
-     * - create assistant placeholder
-     */
-    private Mono<Void> ensureContextOnce(
-            AtomicBoolean ctxInit,
-            User user,
-            Conversation existingConvoOrNull,
-            boolean convoExistedAtStart,
-            String question,
-            AtomicReference<String> sessionIdRef,
-            AtomicReference<Long> convoPkRef,
-            AtomicReference<Long> assistantMsgPkRef
-    ) {
-        return Mono.fromCallable(() -> {
-                    if (!ctxInit.compareAndSet(false, true)) {
-                        return (Void) null;
-                    }
-
-                    // session final: prefer request.session_id, else generate stable id
-                    String finalSessionId = (sessionIdRef.get() == null || sessionIdRef.get().isBlank())
-                            ? "sess-" + System.currentTimeMillis() + "-" + ThreadLocalRandom.current().nextInt(1000, 10000)
-                            : sessionIdRef.get();
-                    sessionIdRef.set(finalSessionId);
-
-                    // if we already had convo (existing), use it; otherwise create/ensure
-                    Conversation convo = existingConvoOrNull;
-                    if (convo == null) {
-                        convo = persistence.ensureConversation(user, finalSessionId, titleFromQuestion(question));
-                    }
-
-                    convoPkRef.set(convo.getId());
-
-                    // Only save user message here if it was NOT saved earlier
-                    // (saved earlier happens only when convo existed at start)
-                    if (!convoExistedAtStart && existingConvoOrNull == null) {
-                        persistence.saveUserMessage(convo, question);
-                    }
-
-                    Message placeholder = persistence.createAssistantPlaceholder(convo);
-                    assistantMsgPkRef.set(placeholder.getId());
-
-                    return (Void) null;
-                })
-                .subscribeOn(Schedulers.boundedElastic());
     }
 
     private String titleFromQuestion(String q) {

@@ -9,7 +9,7 @@ Accept: text/event-stream
         "content": [
           {
             "type": "text",
-            "text": "Dimana saya bisa buka rekening BNI ?"
+            "text": "Apakah BNI ada cabang di malaysia ?"
           }
         ],
         "additional_kwargs": {},
@@ -20,8 +20,8 @@ Accept: text/event-stream
         "example": false
       }
     ],
-    "user_id": "USERCISO",
-    "session_id": "c090366e-9c04-41c4-ace6-f4xa56264099",
+    "user_id": "3f0b2d1e-8a9c-4f34-9a7a-2e7b7d0e1234",
+    "session_id": "c090366e-9c04-41c4-ace6-f4xa56264190",
     "divisi_type": "divisi"
   }
 }
