@@ -17,6 +17,8 @@ public class BlockingChatPersistence {
     private final UserSessionRepository userSessionRepository;
     private final StreamEventRepository streamEventRepository;
 
+    private static final String EMPTY_CLOB = " ";
+
     @Transactional
     public Conversation ensureConversation(User user, String sessionId, String titleIfNew) {
         Conversation convo = conversationRepository.findByUserAndSessionId(user, sessionId).orElse(null);
@@ -48,7 +50,7 @@ public class BlockingChatPersistence {
         Message m = new Message();
         m.setConversation(convo);
         m.setRole("user");
-        m.setContentClob(question == null ? "" : question);
+        m.setContentClob(normalizeContent(question));
         return messageRepository.save(m);
     }
 
@@ -57,15 +59,19 @@ public class BlockingChatPersistence {
         Message m = new Message();
         m.setConversation(convo);
         m.setRole("assistant");
-        m.setContentClob("");
+        m.setContentClob(EMPTY_CLOB);
         return messageRepository.save(m);
     }
 
     @Transactional
     public void finalizeAssistantMessage(Long assistantMsgId, String finalText) {
         Message am = messageRepository.findById(assistantMsgId).orElseThrow();
-        am.setContentClob(finalText == null ? "" : finalText);
+        am.setContentClob(normalizeContent(finalText));
         messageRepository.save(am);
+    }
+
+    private String normalizeContent(String text) {
+        return (text == null || text.isBlank()) ? EMPTY_CLOB : text;
     }
 
     @Transactional

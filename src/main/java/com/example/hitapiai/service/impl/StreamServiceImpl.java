@@ -25,6 +25,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.ThreadLocalRandom;
 
 @Slf4j
 @Service
@@ -133,17 +134,12 @@ public class StreamServiceImpl implements StreamService {
                             if (runId != null && !runId.isBlank()) runIdRef.compareAndSet(null, runId);
 
                             if ("metadata".equals(event)) {
-                                String effectiveRunId = (runIdRef.get() != null && !runIdRef.get().isBlank())
-                                        ? runIdRef.get()
-                                        : "run-fallback-" + System.nanoTime();
-
                                 Mono<Void> initMono = userMono.zipWith(convoIfExistsMono)
                                         .flatMap(tuple -> ensureContextOnce(
                                                 ctxInit,
                                                 tuple.getT1(),
                                                 tuple.getT2(),
                                                 convoExistedAtStart.get(),
-                                                effectiveRunId,
                                                 question,
                                                 sessionIdRef,
                                                 convoPkRef,
@@ -168,10 +164,6 @@ public class StreamServiceImpl implements StreamService {
                             String delta = root.path("data").path("chunk").path("content").asText("");
                             if (delta == null || delta.isBlank()) return Flux.empty();
 
-                            String effectiveRunId = (runIdRef.get() != null && !runIdRef.get().isBlank())
-                                    ? runIdRef.get()
-                                    : "run-fallback-" + System.nanoTime();
-
                             // ensure context once, AFTER first chunk arrives (because run_id exists here)
                             Mono<Void> initMono = userMono.zipWith(convoIfExistsMono)
                                     .flatMap(tuple -> ensureContextOnce(
@@ -179,7 +171,6 @@ public class StreamServiceImpl implements StreamService {
                                             tuple.getT1(),              // user
                                             tuple.getT2(),              // existing convo (nullable)
                                             convoExistedAtStart.get(),  // existed from pre-check?
-                                            effectiveRunId,
                                             question,
                                             sessionIdRef,
                                             convoPkRef,
@@ -251,7 +242,7 @@ public class StreamServiceImpl implements StreamService {
 
     /**
      * init context exactly once:
-     * - decide sessionId final (prefer request.session_id, else run_id)
+     * - decide sessionId final (prefer request.session_id, else generate)
      * - ensure conversation exists
      * - if conversation did NOT exist at start, save user message now
      * - create assistant placeholder
@@ -261,7 +252,6 @@ public class StreamServiceImpl implements StreamService {
             User user,
             Conversation existingConvoOrNull,
             boolean convoExistedAtStart,
-            String runId,
             String question,
             AtomicReference<String> sessionIdRef,
             AtomicReference<Long> convoPkRef,
@@ -272,9 +262,9 @@ public class StreamServiceImpl implements StreamService {
                         return (Void) null;
                     }
 
-                    // session final: prefer request.session_id, else run_id
+                    // session final: prefer request.session_id, else generate stable id
                     String finalSessionId = (sessionIdRef.get() == null || sessionIdRef.get().isBlank())
-                            ? runId
+                            ? "sess-" + System.currentTimeMillis() + "-" + ThreadLocalRandom.current().nextInt(1000, 10000)
                             : sessionIdRef.get();
                     sessionIdRef.set(finalSessionId);
 
