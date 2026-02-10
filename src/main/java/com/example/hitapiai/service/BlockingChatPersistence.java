@@ -14,35 +14,21 @@ public class BlockingChatPersistence {
 
     private final ConversationRepository conversationRepository;
     private final MessageRepository messageRepository;
-    private final UserSessionRepository userSessionRepository;
     private final StreamEventRepository streamEventRepository;
 
     private static final String EMPTY_CLOB = " ";
 
     @Transactional
-    public Conversation ensureConversation(User user, String sessionId, String titleIfNew) {
-        Conversation convo = conversationRepository.findByUserAndSessionId(user, sessionId).orElse(null);
+    public Conversation ensureConversation(User user, String conversationId, String titleIfNew) {
+        Conversation convo = conversationRepository.findByUserAndConversationId(user, conversationId).orElse(null);
         if (convo == null) {
             convo = new Conversation();
             convo.setUser(user);
-            convo.setSessionId(sessionId);
+            convo.setConversationId(conversationId);
             convo.setTitle(titleIfNew != null ? titleIfNew : "New Chat");
             convo = conversationRepository.save(convo);
         }
-        upsertUserSession(user, sessionId);
         return convo;
-    }
-
-    @Transactional
-    public void upsertUserSession(User user, String sessionId) {
-        UserSession us = userSessionRepository.findBySessionId(sessionId).orElse(null);
-        if (us == null) {
-            us = new UserSession();
-            us.setSessionId(sessionId);
-            us.setUser(user);
-            us.setCreatedAt(LocalDateTime.now());
-        }
-        userSessionRepository.save(us);
     }
 
     @Transactional

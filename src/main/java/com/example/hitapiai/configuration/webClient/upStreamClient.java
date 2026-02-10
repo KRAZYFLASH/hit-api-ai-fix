@@ -31,7 +31,7 @@ public class upStreamClient {
         return Flux.create(sink -> {
             StringBuilder carry = new StringBuilder();
             body.doOnNext(buf -> {
-                        String chunk = buf.toString(StandardCharsets.UTF_8);
+                        String chunk = StandardCharsets.UTF_8.decode(buf.asByteBuffer()).toString();
                         DataBufferUtils.release(buf);
                         carry.append(chunk);
                         int idx;

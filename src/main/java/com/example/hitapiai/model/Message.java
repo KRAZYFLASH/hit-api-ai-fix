@@ -12,7 +12,7 @@ import java.time.LocalDateTime;
 @Table(
         name = "messages",
         indexes = {
-                @Index(name = "idx_messages_conversation_created", columnList = "conversation_id, created_at"),
+                @Index(name = "idx_messages_convo_created", columnList = "conversation_id, created_at"),
                 @Index(name = "idx_messages_role", columnList = "role")
         }
 )

@@ -6,7 +6,7 @@ import org.springframework.data.jpa.repository.JpaRepository;
 
 import java.util.Optional;
 
-public interface ConversationRepository extends JpaRepository<Conversation, Long> {
-    Optional<Conversation> findByUserAndSessionId(User user, String sessionId);
-    Optional<Conversation> findBySessionId(String sessionId);
+public interface ConversationRepository extends JpaRepository<Conversation, String> {
+    Optional<Conversation> findByUserAndConversationId(User user, String conversationId);
+    Optional<Conversation> findByConversationId(String conversationId);
 }

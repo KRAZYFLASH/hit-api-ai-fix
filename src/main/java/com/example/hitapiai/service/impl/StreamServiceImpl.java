@@ -47,14 +47,17 @@ public class StreamServiceImpl implements StreamService {
     public Flux<ServerSentEvent<ChatEvent>> streamLive(StreamEventRequest req) {
 
         String userId = req.getInput().getUser_id();
-        String initialSessionId = req.getInput().getSession_id();
+        String tempCid = req.getInput().getConversation_id();
+        if (tempCid == null || tempCid.isBlank()) {
+            tempCid = req.getInput().getSessionId();
+        }
+        final String initialConversationId = tempCid;
         String question = filterText.extractUserText(req);
 
         // ===== state per request =====
         AtomicReference<String> runIdRef = new AtomicReference<>(null);
-        AtomicReference<String> sessionIdRef = new AtomicReference<>(initialSessionId);
+        AtomicReference<String> conversationIdRef = new AtomicReference<>(initialConversationId);
 
-        AtomicReference<Long> convoPkRef = new AtomicReference<>(null);
         AtomicReference<Long> assistantMsgPkRef = new AtomicReference<>(null);
 
         AtomicReference<StringBuilder> bufRef = new AtomicReference<>(new StringBuilder());
@@ -76,14 +79,12 @@ public class StreamServiceImpl implements StreamService {
         // 2) Load or Create conversation immediately
         Mono<Conversation> convoMono = userMono.flatMap(user ->
                 Mono.fromCallable(() -> {
-                    String sid = initialSessionId;
-                    if (sid == null || sid.isBlank()) {
-                        sid = "sess-" + System.currentTimeMillis() + "-" + ThreadLocalRandom.current().nextInt(1000, 10000);
+                    String cid = initialConversationId;
+                    if (cid == null || cid.isBlank()) {
+                        cid = "convo-" + System.currentTimeMillis() + "-" + ThreadLocalRandom.current().nextInt(1000, 10000);
                     }
-                    sessionIdRef.set(sid);
-                    Conversation convo = persistence.ensureConversation(user, sid, titleFromQuestion(question));
-                    convoPkRef.set(convo.getId());
-                    return convo;
+                    conversationIdRef.set(cid);
+                    return persistence.ensureConversation(user, cid, titleFromQuestion(question));
                 }).subscribeOn(Schedulers.boundedElastic())
         ).cache();
 
@@ -101,27 +102,34 @@ public class StreamServiceImpl implements StreamService {
         // 4) streaming upstream -> SSE
         Flux<ServerSentEvent<ChatEvent>> upstreamSse =
                 upStreamClient.streamNdjsonLines(req)
-                        .concatMap(line -> {
-                            if (line == null) {
-                                return Flux.empty();
-                            }
-                            String normalized = line.trim();
-                            if (normalized.isEmpty() || normalized.startsWith("event:")) {
-                                return Flux.empty();
-                            }
-                            if (normalized.startsWith("data:")) {
-                                normalized = normalized.substring(5).trim();
-                            }
+                .concatMap(line -> {
+                    if (line == null) {
+                        return Flux.empty();
+                    }
+                    log.info("Upstream line raw: {}", line);
+                    String normalized = line.trim();
+                    if (normalized.isEmpty() || normalized.startsWith("event:")) {
+                        return Flux.empty();
+                    }
+                    if (normalized.startsWith("data:")) {
+                        normalized = normalized.substring(5).trim();
+                    }
 
-                            final JsonNode root;
-                            try {
-                                root = om.readTree(normalized);
-                            } catch (Exception e) {
-                                return Flux.just(sse("error", ChatEvent.error(
-                                        sessionIdRef.get(), convoPkRef.get(), assistantMsgPkRef.get(), runIdRef.get(),
-                                        "Invalid upstream JSON: " + e.getMessage()
-                                )));
-                            }
+                    if (normalized.equals("[DONE]")) {
+                        log.info("Received [DONE] from upstream");
+                        return Flux.empty();
+                    }
+
+                    final JsonNode root;
+                    try {
+                        root = om.readTree(normalized);
+                    } catch (Exception e) {
+                        log.error("Failed to parse JSON from upstream: '{}'. Error: {}", normalized, e.getMessage());
+                        return Flux.just(sse("error", ChatEvent.error(
+                                conversationIdRef.get(), assistantMsgPkRef.get(), runIdRef.get(),
+                                "Invalid upstream JSON: " + e.getMessage()
+                        )));
+                    }
 
                             String event = root.path("event").asText("");
                             String runId = root.path("run_id").asText(null);
@@ -133,7 +141,7 @@ public class StreamServiceImpl implements StreamService {
                             if ("metadata".equals(event)) {
                                 if (metaEmitted.compareAndSet(false, true)) {
                                     return Flux.just(sse("metadata", ChatEvent.metadata(
-                                            sessionIdRef.get(), convoPkRef.get(), assistantMsgPkRef.get(), runIdRef.get()
+                                            conversationIdRef.get(), assistantMsgPkRef.get(), runIdRef.get()
                                     )));
                                 }
                                 return Flux.empty();
@@ -150,7 +158,7 @@ public class StreamServiceImpl implements StreamService {
                             Flux<ServerSentEvent<ChatEvent>> meta = Flux.empty();
                             if (metaEmitted.compareAndSet(false, true)) {
                                 meta = Flux.just(sse("metadata", ChatEvent.metadata(
-                                        sessionIdRef.get(), convoPkRef.get(), assistantMsgPkRef.get(), runIdRef.get()
+                                        conversationIdRef.get(), assistantMsgPkRef.get(), runIdRef.get()
                                 )));
                             }
 
@@ -159,40 +167,48 @@ public class StreamServiceImpl implements StreamService {
                                 StringBuilder sb = bufRef.get();
                                 int remaining = MAX_BUFFER_CHARS - sb.length();
                                 if (remaining > 0) {
-                                    if (delta.length() <= remaining) sb.append(delta);
-                                    else {
-                                        sb.append(delta, 0, remaining);
-                                        truncated.set(true);
-                                    }
-                                } else truncated.set(true);
-                            }
+                        if (delta.length() <= remaining) {
+                            sb.append(delta);
+                        } else {
+                            sb.append(delta, 0, remaining);
+                            truncated.set(true);
+                        }
+                        log.info("Delta appended: '{}', current buffer length: {}", delta, sb.length());
+                    } else {
+                        truncated.set(true);
+                    }
+                }
 
-                            Flux<ServerSentEvent<ChatEvent>> chunk = Flux.just(
+                Flux<ServerSentEvent<ChatEvent>> chunk = Flux.just(
                                     sse("chunk", ChatEvent.chunk(
-                                            sessionIdRef.get(), convoPkRef.get(), assistantMsgPkRef.get(), runIdRef.get(), delta
+                                            conversationIdRef.get(), assistantMsgPkRef.get(), runIdRef.get(), delta
                                     ))
                             );
 
                             return Flux.concat(meta, chunk);
                         })
-                        .onErrorResume(err -> Flux.just(
-                                sse("error", ChatEvent.error(
-                                        sessionIdRef.get(), convoPkRef.get(), assistantMsgPkRef.get(), runIdRef.get(),
-                                        err.getMessage()
-                                ))
-                        ));
+                        .onErrorResume(err -> {
+                            log.error("Streaming error: ", err);
+                            return Flux.just(
+                                    sse("error", ChatEvent.error(
+                                            conversationIdRef.get(), assistantMsgPkRef.get(), runIdRef.get(),
+                                            err.getMessage()
+                                    ))
+                            );
+                        });
 
         // 5) finalize assistant at end
         Flux<ServerSentEvent<ChatEvent>> finalize =
                 Mono.fromCallable(() -> {
                     Long asstId = assistantMsgPkRef.get();
+                    String finalText = bufRef.get().toString();
+                    log.info("Finalizing assistant message. id={}, length={}", asstId, finalText.length());
                     if (asstId != null) {
-                        String finalText = bufRef.get().toString();
                         if (truncated.get()) finalText = finalText + "\n\n[TRUNCATED]";
                         persistence.finalizeAssistantMessage(asstId, finalText);
                     }
                     return sse("done", ChatEvent.done(
-                            sessionIdRef.get(), convoPkRef.get(), assistantMsgPkRef.get(), runIdRef.get()
+                            conversationIdRef.get(), asstId, runIdRef.get()
                     ));
                 })
                 .subscribeOn(Schedulers.boundedElastic())
@@ -202,7 +218,7 @@ public class StreamServiceImpl implements StreamService {
                 .thenMany(upstreamSse.concatWith(finalize))
                 .doFinally(sig -> {
                     if (sig == reactor.core.publisher.SignalType.CANCEL) {
-                        log.warn("Client disconnected. sessionId={}, runId={}", sessionIdRef.get(), runIdRef.get());
+                        log.warn("Client disconnected. conversationId={}, runId={}", conversationIdRef.get(), runIdRef.get());
                     }
                 });
     }

@@ -16,7 +16,16 @@ public class StreamEventRequest {
     public static class Input {
         private List<MessageDto> messages;
         private String user_id;
-        private String session_id;
+
+        @com.fasterxml.jackson.annotation.JsonProperty("conversation_id")
+        @com.fasterxml.jackson.annotation.JsonAlias("session_id")
+        private String conversation_id;
+
+        @com.fasterxml.jackson.annotation.JsonProperty("session_id")
+        public String getSessionId() {
+            return conversation_id;
+        }
+
         private String divisi_type;
     }
 
