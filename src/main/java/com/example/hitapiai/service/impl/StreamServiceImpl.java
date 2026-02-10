@@ -51,6 +51,14 @@ public class StreamServiceImpl implements StreamService {
         if (tempCid == null || tempCid.isBlank()) {
             tempCid = req.getInput().getSessionId();
         }
+        
+        // Pastikan ID digenerate di awal jika kosong
+        if (tempCid == null || tempCid.isBlank()) {
+            tempCid = "convo-" + System.currentTimeMillis() + "-" + ThreadLocalRandom.current().nextInt(1000, 10000);
+            req.getInput().setSessionId(tempCid); // Update req untuk dikirim ke upstream
+            log.info("Generated new session_id: {}", tempCid);
+        }
+        
         final String initialConversationId = tempCid;
         String question = filterText.extractUserText(req);
 
@@ -79,12 +87,7 @@ public class StreamServiceImpl implements StreamService {
         // 2) Load or Create conversation immediately
         Mono<Conversation> convoMono = userMono.flatMap(user ->
                 Mono.fromCallable(() -> {
-                    String cid = initialConversationId;
-                    if (cid == null || cid.isBlank()) {
-                        cid = "convo-" + System.currentTimeMillis() + "-" + ThreadLocalRandom.current().nextInt(1000, 10000);
-                    }
-                    conversationIdRef.set(cid);
-                    return persistence.ensureConversation(user, cid, titleFromQuestion(question));
+                    return persistence.ensureConversation(user, initialConversationId, titleFromQuestion(question));
                 }).subscribeOn(Schedulers.boundedElastic())
         ).cache();
 

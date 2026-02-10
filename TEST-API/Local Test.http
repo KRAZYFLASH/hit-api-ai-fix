@@ -9,7 +9,7 @@ Accept: text/event-stream
         "content": [
           {
             "type": "text",
-            "text": "Apakah BNI dapat melakukan peminjaman seperti untuk cicilan mobil ?"
+            "text": "Apakah BNI dapat mengajukan peminjaman untuk usaha saya ?"
           }
         ],
         "additional_kwargs": {},

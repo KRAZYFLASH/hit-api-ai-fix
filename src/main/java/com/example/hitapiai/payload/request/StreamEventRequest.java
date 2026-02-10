@@ -26,6 +26,11 @@ public class StreamEventRequest {
             return conversation_id;
         }
 
+        @com.fasterxml.jackson.annotation.JsonProperty("session_id")
+        public void setSessionId(String sessionId) {
+            this.conversation_id = sessionId;
+        }
+
         private String divisi_type;
     }
 
