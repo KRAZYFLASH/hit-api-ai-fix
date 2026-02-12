@@ -48,34 +48,19 @@ public class StreamServiceImpl implements StreamService {
 
         String userId = req.getInput().getUser_id();
         String tempCid = req.getInput().getConversation_id();
-        if (tempCid == null || tempCid.isBlank()) {
-            tempCid = req.getInput().getSessionId();
-        }
         
-        // Pastikan ID digenerate di awal jika kosong
+        // Pastikan ID digenerate di awal jika kosong (menggunakan format UUID)
         if (tempCid == null || tempCid.isBlank()) {
-            tempCid = "convo-" + System.currentTimeMillis() + "-" + ThreadLocalRandom.current().nextInt(1000, 10000);
+            tempCid = java.util.UUID.randomUUID().toString();
             req.getInput().setSessionId(tempCid); // Update req untuk dikirim ke upstream
-            log.info("Generated new session_id: {}", tempCid);
+            log.info("Generated new session_id (UUID): {}", tempCid);
         }
         
         final String initialConversationId = tempCid;
         String question = filterText.extractUserText(req);
 
         // ===== state per request =====
-        AtomicReference<String> runIdRef = new AtomicReference<>(null);
-        AtomicReference<String> conversationIdRef = new AtomicReference<>(initialConversationId);
-
-        AtomicReference<Long> assistantMsgPkRef = new AtomicReference<>(null);
-
-        AtomicReference<StringBuilder> bufRef = new AtomicReference<>(new StringBuilder());
-        AtomicBoolean truncated = new AtomicBoolean(false);
-
-        AtomicBoolean ctxInit = new AtomicBoolean(false);
-        AtomicBoolean metaEmitted = new AtomicBoolean(false);
-
-        // flag: apakah convo sudah ada sejak awal?
-        AtomicBoolean convoExistedAtStart = new AtomicBoolean(false);
+        StreamState state = new StreamState(initialConversationId);
 
         // 1) load user (blocking JPA -> boundedElastic)
         Mono<User> userMono = Mono.fromCallable(() ->
@@ -86,18 +71,17 @@ public class StreamServiceImpl implements StreamService {
 
         // 2) Load or Create conversation immediately
         Mono<Conversation> convoMono = userMono.flatMap(user ->
-                Mono.fromCallable(() -> {
-                    return persistence.ensureConversation(user, initialConversationId, titleFromQuestion(question));
-                }).subscribeOn(Schedulers.boundedElastic())
+                Mono.fromCallable(() -> persistence.ensureConversation(user, initialConversationId, titleFromQuestion(question)))
+                        .subscribeOn(Schedulers.boundedElastic())
         ).cache();
 
-        // 3) Save User Message & Create Assistant Placeholder
+        // 3) Save User Message & Create Assistant Placeholder (In Parallel with Upstream)
         Mono<Void> contextInitMono = convoMono.flatMap(convo ->
                 Mono.fromCallable(() -> {
                     persistence.saveUserMessage(convo, question);
                     Message placeholder = persistence.createAssistantPlaceholder(convo);
-                    assistantMsgPkRef.set(placeholder.getId());
-                    ctxInit.set(true);
+                    state.assistantMsgPk.set(placeholder.getId());
+                    state.ctxInit.set(true);
                     return (Void) null;
                 }).subscribeOn(Schedulers.boundedElastic())
         ).then();
@@ -129,99 +113,101 @@ public class StreamServiceImpl implements StreamService {
                     } catch (Exception e) {
                         log.error("Failed to parse JSON from upstream: '{}'. Error: {}", normalized, e.getMessage());
                         return Flux.just(sse("error", ChatEvent.error(
-                                conversationIdRef.get(), assistantMsgPkRef.get(), runIdRef.get(),
+                                state.conversationId.get(), state.assistantMsgPk.get(), state.runId.get(),
                                 "Invalid upstream JSON: " + e.getMessage()
                         )));
                     }
 
-                            String event = root.path("event").asText("");
-                            String runId = root.path("run_id").asText(null);
-                            if (runId == null || runId.isBlank()) {
-                                runId = root.path("data").path("run_id").asText(null);
-                            }
-                            if (runId != null && !runId.isBlank()) runIdRef.compareAndSet(null, runId);
-
-                            if ("metadata".equals(event)) {
-                                if (metaEmitted.compareAndSet(false, true)) {
-                                    return Flux.just(sse("metadata", ChatEvent.metadata(
-                                            conversationIdRef.get(), assistantMsgPkRef.get(), runIdRef.get()
-                                    )));
-                                }
-                                return Flux.empty();
-                            }
-
-                            // upstream kamu utama: on_chat_model_stream
-                            if (!"on_chat_model_stream".equals(event)) {
-                                return Flux.empty();
-                            }
-
-                            String delta = root.path("data").path("chunk").path("content").asText("");
-                            if (delta == null || delta.isBlank()) return Flux.empty();
-
-                            Flux<ServerSentEvent<ChatEvent>> meta = Flux.empty();
-                            if (metaEmitted.compareAndSet(false, true)) {
-                                meta = Flux.just(sse("metadata", ChatEvent.metadata(
-                                        conversationIdRef.get(), assistantMsgPkRef.get(), runIdRef.get()
-                                )));
-                            }
-
-                            // buffer append with limit
-                            if (!truncated.get()) {
-                                StringBuilder sb = bufRef.get();
-                                int remaining = MAX_BUFFER_CHARS - sb.length();
-                                if (remaining > 0) {
-                        if (delta.length() <= remaining) {
-                            sb.append(delta);
-                        } else {
-                            sb.append(delta, 0, remaining);
-                            truncated.set(true);
-                        }
-                        log.info("Delta appended: '{}', current buffer length: {}", delta, sb.length());
-                    } else {
-                        truncated.set(true);
+                    String event = root.path("event").asText("");
+                    String runId = root.path("run_id").asText(null);
+                    if (runId == null || runId.isBlank()) {
+                        runId = root.path("data").path("run_id").asText(null);
                     }
-                }
+                    if (runId != null && !runId.isBlank()) state.runId.compareAndSet(null, runId);
 
-                Flux<ServerSentEvent<ChatEvent>> chunk = Flux.just(
-                                    sse("chunk", ChatEvent.chunk(
-                                            conversationIdRef.get(), assistantMsgPkRef.get(), runIdRef.get(), delta
-                                    ))
-                            );
+                    if ("metadata".equals(event)) {
+                        if (state.metaEmitted.compareAndSet(false, true)) {
+                            return Flux.just(sse("metadata", ChatEvent.metadata(
+                                    state.conversationId.get(), state.assistantMsgPk.get(), state.runId.get()
+                            )));
+                        }
+                        return Flux.empty();
+                    }
 
-                            return Flux.concat(meta, chunk);
-                        })
-                        .onErrorResume(err -> {
-                            log.error("Streaming error: ", err);
-                            return Flux.just(
-                                    sse("error", ChatEvent.error(
-                                            conversationIdRef.get(), assistantMsgPkRef.get(), runIdRef.get(),
-                                            err.getMessage()
-                                    ))
-                            );
-                        });
+                    // upstream kamu utama: on_chat_model_stream
+                    if (!"on_chat_model_stream".equals(event)) {
+                        return Flux.empty();
+                    }
+
+                    String delta = root.path("data").path("chunk").path("content").asText("");
+                    if (delta == null || delta.isBlank()) return Flux.empty();
+
+                    Flux<ServerSentEvent<ChatEvent>> meta = Flux.empty();
+                    if (state.metaEmitted.compareAndSet(false, true)) {
+                        meta = Flux.just(sse("metadata", ChatEvent.metadata(
+                                state.conversationId.get(), state.assistantMsgPk.get(), state.runId.get()
+                        )));
+                    }
+
+                    // buffer append with limit
+                    if (!state.truncated.get()) {
+                        StringBuilder sb = state.buffer.get();
+                        int remaining = MAX_BUFFER_CHARS - sb.length();
+                        if (remaining > 0) {
+                            if (delta.length() <= remaining) {
+                                sb.append(delta);
+                            } else {
+                                sb.append(delta, 0, remaining);
+                                state.truncated.set(true);
+                            }
+                            log.info("Delta appended: '{}', current buffer length: {}", delta, sb.length());
+                        } else {
+                            state.truncated.set(true);
+                        }
+                    }
+
+                    Flux<ServerSentEvent<ChatEvent>> chunk = Flux.just(
+                            sse("chunk", ChatEvent.chunk(
+                                    state.conversationId.get(), state.assistantMsgPk.get(), state.runId.get(), delta
+                            ))
+                    );
+
+                    return Flux.concat(meta, chunk);
+                })
+                .onErrorResume(err -> {
+                    log.error("Streaming error: ", err);
+                    return Flux.just(
+                            sse("error", ChatEvent.error(
+                                    state.conversationId.get(), state.assistantMsgPk.get(), state.runId.get(),
+                                    err.getMessage()
+                            ))
+                    );
+                });
 
         // 5) finalize assistant at end
         Flux<ServerSentEvent<ChatEvent>> finalize =
-                Mono.fromCallable(() -> {
-                    Long asstId = assistantMsgPkRef.get();
-                    String finalText = bufRef.get().toString();
+                contextInitMono.then(Mono.fromCallable(() -> {
+                    Long asstId = state.assistantMsgPk.get();
+                    String finalText = state.buffer.get().toString();
                     log.info("Finalizing assistant message. id={}, length={}", asstId, finalText.length());
                     if (asstId != null) {
-                        if (truncated.get()) finalText = finalText + "\n\n[TRUNCATED]";
+                        if (state.truncated.get()) finalText = finalText + "\n\n[TRUNCATED]";
                         persistence.finalizeAssistantMessage(asstId, finalText);
                     }
                     return sse("done", ChatEvent.done(
-                            conversationIdRef.get(), asstId, runIdRef.get()
+                            state.conversationId.get(), asstId, state.runId.get()
                     ));
-                })
+                }))
                 .subscribeOn(Schedulers.boundedElastic())
                 .flux();
 
-        return contextInitMono
-                .thenMany(upstreamSse.concatWith(finalize))
+        return Flux.merge(contextInitMono, upstreamSse)
+                .filter(o -> o instanceof ServerSentEvent)
+                .map(o -> (ServerSentEvent<ChatEvent>) o)
+                .concatWith(finalize)
                 .doFinally(sig -> {
                     if (sig == reactor.core.publisher.SignalType.CANCEL) {
-                        log.warn("Client disconnected. conversationId={}, runId={}", conversationIdRef.get(), runIdRef.get());
+                        log.warn("Client disconnected. conversationId={}, runId={}", state.conversationId.get(), state.runId.get());
                     }
                 });
     }
@@ -230,6 +216,21 @@ public class StreamServiceImpl implements StreamService {
         if (q == null) return "New Chat";
         String s = q.strip();
         return s.length() <= 60 ? s : s.substring(0, 60);
+    }
+
+    private static class StreamState {
+        final AtomicReference<String> runId = new AtomicReference<>(null);
+        final AtomicReference<String> conversationId;
+        final AtomicReference<Long> assistantMsgPk = new AtomicReference<>(null);
+        final AtomicReference<StringBuilder> buffer = new AtomicReference<>(new StringBuilder());
+        final AtomicBoolean truncated = new AtomicBoolean(false);
+        final AtomicBoolean ctxInit = new AtomicBoolean(false);
+        final AtomicBoolean metaEmitted = new AtomicBoolean(false);
+        final AtomicBoolean convoExistedAtStart = new AtomicBoolean(false);
+
+        StreamState(String initialConversationId) {
+            this.conversationId = new AtomicReference<>(initialConversationId);
+        }
     }
 
     private ServerSentEvent<ChatEvent> sse(String event, ChatEvent data) {
