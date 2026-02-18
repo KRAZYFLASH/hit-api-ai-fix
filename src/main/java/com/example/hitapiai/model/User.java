@@ -1,52 +1,57 @@
 package com.example.hitapiai.model;
 
-import jakarta.persistence.*;
+import org.springframework.data.annotation.Id;
+import org.springframework.data.annotation.Transient;
+import org.springframework.data.domain.Persistable;
+import org.springframework.data.relational.core.mapping.Table;
+import org.springframework.data.relational.core.mapping.Column;
 import lombok.*;
-import org.hibernate.annotations.CreationTimestamp;
 
 import java.time.LocalDateTime;
 import java.util.UUID;
 
 @Getter @Setter
 @NoArgsConstructor @AllArgsConstructor
-@Entity
-@Table(
-        name = "users",
-        uniqueConstraints = {
-                @UniqueConstraint(name = "uk_users_username", columnNames = "username"),
-                @UniqueConstraint(name = "uk_users_email", columnNames = "email")
-        },
-        indexes = {
-                @Index(name = "idx_users_username", columnList = "username"),
-                @Index(name = "idx_users_email", columnList = "email")
-        }
-)
-public class User {
+@Table("USERS")
+public class User implements Persistable<String> {
 
     @Id
-    @Column(name = "id", length = 36, nullable = false, updatable = false)
+    @Column("ID")
     private String id;
 
-    @Column(name = "username", nullable = false, length = 100)
+    @Column("USERNAME")
     private String username;
 
-    @Column(name = "email", length = 200)
+    @Column("EMAIL")
     private String email; // nullable
 
-    @Column(name = "password", nullable = false, length = 255)
+    @Column("PASSWORD")
     private String password;
 
-    @CreationTimestamp
-    @Column(name = "created_at", nullable = false, updatable = false)
+    @Column("CREATED_AT")
     private LocalDateTime createdAt;
 
-    @Column(name = "last_login")
+    @Column("LAST_LOGIN")
     private LocalDateTime lastLogin;
 
-    @PrePersist
-    void prePersist() {
+    @Transient
+    private boolean isNew = true;
+
+    @Override
+    public boolean isNew() {
+        return isNew;
+    }
+
+    public void setNew(boolean isNew) {
+        this.isNew = isNew;
+    }
+
+    public void initializeId() {
         if (id == null || id.isBlank()) {
             id = UUID.randomUUID().toString();
+        }
+        if (createdAt == null) {
+            createdAt = LocalDateTime.now();
         }
     }
 }

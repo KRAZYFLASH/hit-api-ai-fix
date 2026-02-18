@@ -1,45 +1,44 @@
 package com.example.hitapiai.model;
 
-import jakarta.persistence.*;
+import org.springframework.data.annotation.Id;
+import org.springframework.data.annotation.Transient;
+import org.springframework.data.domain.Persistable;
+import org.springframework.data.relational.core.mapping.Table;
+import org.springframework.data.relational.core.mapping.Column;
 import lombok.*;
-import org.hibernate.annotations.CreationTimestamp;
 
 import java.time.LocalDateTime;
 
 @Getter @Setter
 @NoArgsConstructor @AllArgsConstructor
-@Entity
-@Table(
-        name = "messages",
-        indexes = {
-                @Index(name = "idx_messages_convo_created", columnList = "conversation_id, created_at"),
-                @Index(name = "idx_messages_role", columnList = "role")
-        }
-)
-public class Message {
+@Table("MESSAGES")
+public class Message implements Persistable<Long> {
 
     @Id
-    @SequenceGenerator(
-            name = "messages_seq_gen",
-            sequenceName = "messages_seq",
-            allocationSize = 1
-    )
-    @GeneratedValue(strategy = GenerationType.SEQUENCE, generator = "messages_seq_gen")
-    @Column(name = "id", nullable = false)
+    @Column("ID")
     private Long id;
 
-    @ManyToOne(fetch = FetchType.LAZY, optional = false)
-    @JoinColumn(name = "conversation_id", nullable = false, foreignKey = @ForeignKey(name = "fk_messages_conversation"))
-    private Conversation conversation;
+    @Column("CONVERSATION_ID")
+    private String conversationId;
 
-    @Column(name = "role", nullable = false, length = 30)
+    @Column("ROLE")
     private String role; // "user" / "assistant"
 
-    @Lob
-    @Column(name = "content_clob", nullable = false, columnDefinition = "CLOB")
+    @Column("CONTENT_CLOB")
     private String contentClob;
 
-    @CreationTimestamp
-    @Column(name = "created_at", nullable = false, updatable = false)
+    @Column("CREATED_AT")
     private LocalDateTime createdAt;
+
+    @Transient
+    private boolean isNew = true;
+
+    @Override
+    public boolean isNew() {
+        return isNew || id == null;
+    }
+
+    public void setNew(boolean isNew) {
+        this.isNew = isNew;
+    }
 }

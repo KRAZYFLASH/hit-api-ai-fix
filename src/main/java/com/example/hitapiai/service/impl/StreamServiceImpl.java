@@ -9,7 +9,7 @@ import com.example.hitapiai.payload.SSE.ChatEvent;
 import com.example.hitapiai.payload.request.StreamEventRequest;
 import com.example.hitapiai.repository.ConversationRepository;
 import com.example.hitapiai.repository.UserRepository;
-import com.example.hitapiai.service.BlockingChatPersistence;
+import com.example.hitapiai.service.ReactiveChatPersistence;
 import com.example.hitapiai.service.StreamService;
 import com.example.hitapiai.utils.FilterText;
 import lombok.RequiredArgsConstructor;
@@ -18,7 +18,6 @@ import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
-import reactor.core.scheduler.Schedulers;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -41,12 +40,18 @@ public class StreamServiceImpl implements StreamService {
     private final UserRepository userRepository;
     private final ConversationRepository conversationRepository;
 
-    private final BlockingChatPersistence persistence;
+    private final ReactiveChatPersistence persistence;
 
     @Override
     public Flux<ServerSentEvent<ChatEvent>> streamLive(StreamEventRequest req) {
+        if (req == null || req.getInput() == null) {
+            return Flux.just(sse("error", ChatEvent.error(null, null, null, "Invalid request payload")));
+        }
 
         String userId = req.getInput().getUser_id();
+        if (userId == null || userId.isBlank()) {
+            return Flux.just(sse("error", ChatEvent.error(null, null, null, "User ID is required")));
+        }
         String tempCid = req.getInput().getConversation_id();
         
         // Pastikan ID digenerate di awal jika kosong (menggunakan format UUID)
@@ -62,33 +67,35 @@ public class StreamServiceImpl implements StreamService {
         // ===== state per request =====
         StreamState state = new StreamState(initialConversationId);
 
-        // 1) load user (blocking JPA -> boundedElastic)
-        Mono<User> userMono = Mono.fromCallable(() ->
-                        userRepository.findById(userId)
-                                .orElseThrow(() -> new StreamException("User not found: " + userId)))
-                .subscribeOn(Schedulers.boundedElastic())
+        // 1) load user (Reactive)
+        Mono<User> userMono = userRepository.findById(userId)
+                .switchIfEmpty(Mono.error(new StreamException("User not found: " + userId)))
                 .cache();
 
         // 2) Load or Create conversation immediately
         Mono<Conversation> convoMono = userMono.flatMap(user ->
-                Mono.fromCallable(() -> persistence.ensureConversation(user, initialConversationId, titleFromQuestion(question)))
-                        .subscribeOn(Schedulers.boundedElastic())
+                persistence.ensureConversation(user.getId(), initialConversationId, titleFromQuestion(question))
         ).cache();
 
         // 3) Save User Message & Create Assistant Placeholder (In Parallel with Upstream)
-        Mono<Void> contextInitMono = convoMono.flatMap(convo ->
-                Mono.fromCallable(() -> {
-                    persistence.saveUserMessage(convo, question);
-                    Message placeholder = persistence.createAssistantPlaceholder(convo);
-                    state.assistantMsgPk.set(placeholder.getId());
-                    state.ctxInit.set(true);
-                    return (Void) null;
-                }).subscribeOn(Schedulers.boundedElastic())
-        ).then();
+        Mono<Void> contextInitMono = convoMono.flatMap(convo -> {
+            log.info("Conversation ensured: {}", convo.getConversationId());
+            return persistence.saveUserMessage(convo.getConversationId(), question)
+                    .flatMap(userMsg -> {
+                        log.info("User message saved: {}", userMsg.getId());
+                        return persistence.createAssistantPlaceholder(convo.getConversationId());
+                    })
+                    .map(placeholder -> {
+                        state.assistantMsgPk.set(placeholder.getId());
+                        state.ctxInit.set(true);
+                        log.info("Assistant placeholder created: {}", placeholder.getId());
+                        return placeholder;
+                    });
+        }).then();
 
         // 4) streaming upstream -> SSE
         Flux<ServerSentEvent<ChatEvent>> upstreamSse =
-                upStreamClient.streamNdjsonLines(req)
+                contextInitMono.thenMany(Flux.defer(() -> upStreamClient.streamNdjsonLines(req)))
                 .concatMap(line -> {
                     if (line == null) {
                         return Flux.empty();
@@ -124,6 +131,11 @@ public class StreamServiceImpl implements StreamService {
                         runId = root.path("data").path("run_id").asText(null);
                     }
                     if (runId != null && !runId.isBlank()) state.runId.compareAndSet(null, runId);
+
+                    // Log event metadata to DB in background
+                    persistence.logStreamEvent(state.conversationId.get(), state.runId.get(), event, normalized)
+                            .subscribeOn(reactor.core.scheduler.Schedulers.boundedElastic())
+                            .subscribe(null, err -> log.error("Failed to log stream event: {}", err.getMessage()));
 
                     if ("metadata".equals(event)) {
                         if (state.metaEmitted.compareAndSet(false, true)) {
@@ -186,24 +198,24 @@ public class StreamServiceImpl implements StreamService {
 
         // 5) finalize assistant at end
         Flux<ServerSentEvent<ChatEvent>> finalize =
-                contextInitMono.then(Mono.fromCallable(() -> {
+                Mono.defer(() -> {
                     Long asstId = state.assistantMsgPk.get();
                     String finalText = state.buffer.get().toString();
                     log.info("Finalizing assistant message. id={}, length={}", asstId, finalText.length());
                     if (asstId != null) {
                         if (state.truncated.get()) finalText = finalText + "\n\n[TRUNCATED]";
-                        persistence.finalizeAssistantMessage(asstId, finalText);
+                        return persistence.finalizeAssistantMessage(asstId, finalText)
+                                .thenReturn(sse("done", ChatEvent.done(
+                                        state.conversationId.get(), asstId, state.runId.get()
+                                )));
                     }
-                    return sse("done", ChatEvent.done(
+                    return Mono.just(sse("done", ChatEvent.done(
                             state.conversationId.get(), asstId, state.runId.get()
-                    ));
-                }))
-                .subscribeOn(Schedulers.boundedElastic())
+                    )));
+                })
                 .flux();
 
-        return Flux.merge(contextInitMono, upstreamSse)
-                .filter(o -> o instanceof ServerSentEvent)
-                .map(o -> (ServerSentEvent<ChatEvent>) o)
+        return upstreamSse
                 .concatWith(finalize)
                 .doFinally(sig -> {
                     if (sig == reactor.core.publisher.SignalType.CANCEL) {

@@ -1,0 +1,6 @@
+PUT http://localhost:8003/api/chat/ab00e38b-15f0-40f8-8fdf-496e0f55aa8d/title
+Content-Type: application/json
+
+{
+  "title": "Judul Percakapan Baru Edit"
+}

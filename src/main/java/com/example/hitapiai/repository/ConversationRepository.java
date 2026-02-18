@@ -1,12 +1,14 @@
 package com.example.hitapiai.repository;
 
 import com.example.hitapiai.model.Conversation;
-import com.example.hitapiai.model.User;
-import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.r2dbc.repository.Query;
+import org.springframework.data.repository.reactive.ReactiveCrudRepository;
+import reactor.core.publisher.Mono;
 
-import java.util.Optional;
+public interface ConversationRepository extends ReactiveCrudRepository<Conversation, String> {
+    
+    @Query("SELECT * FROM CONVERSATIONS WHERE USER_ID = :userId AND CONVERSATION_ID = :conversationId")
+    Mono<Conversation> findByUserIdAndConversationId(String userId, String conversationId);
 
-public interface ConversationRepository extends JpaRepository<Conversation, String> {
-    Optional<Conversation> findByUserAndConversationId(User user, String conversationId);
-    Optional<Conversation> findByConversationId(String conversationId);
+    Mono<Conversation> findByConversationId(String conversationId);
 }

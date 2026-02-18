@@ -1,6 +1,9 @@
 package com.example.hitapiai.repository;
 
 import com.example.hitapiai.model.Message;
-import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.repository.reactive.ReactiveCrudRepository;
+import reactor.core.publisher.Flux;
 
-public interface MessageRepository extends JpaRepository<Message, Long> {}
+public interface MessageRepository extends ReactiveCrudRepository<Message, Long> {
+    Flux<Message> findByConversationIdOrderByCreatedAtAsc(String conversationId);
+}

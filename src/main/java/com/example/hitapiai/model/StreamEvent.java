@@ -1,50 +1,47 @@
 package com.example.hitapiai.model;
 
-import jakarta.persistence.*;
+import org.springframework.data.annotation.Id;
+import org.springframework.data.annotation.Transient;
+import org.springframework.data.domain.Persistable;
+import org.springframework.data.relational.core.mapping.Table;
+import org.springframework.data.relational.core.mapping.Column;
 import lombok.*;
-import org.hibernate.annotations.CreationTimestamp;
 
 import java.time.LocalDateTime;
 
 @Getter @Setter
 @NoArgsConstructor @AllArgsConstructor
-@Entity
-@Table(
-        name = "stream_events",
-        indexes = {
-                @Index(name = "idx_stream_events_run_id", columnList = "run_id"),
-                @Index(name = "idx_stream_events_convo_created", columnList = "conversation_id, created_at"),
-                @Index(name = "idx_stream_events_type", columnList = "event_type")
-        }
-)
-public class StreamEvent {
+@Table("STREAM_EVENTS")
+public class StreamEvent implements Persistable<Long> {
 
     @Id
-    @SequenceGenerator(
-            name = "stream_events_seq_gen",
-            sequenceName = "stream_events_seq",
-            allocationSize = 1
-    )
-    @GeneratedValue(strategy = GenerationType.SEQUENCE, generator = "stream_events_seq_gen")
-    @Column(name = "id", nullable = false)
+    @Column("ID")
     private Long id;
 
-    // nullable FK
-    @ManyToOne(fetch = FetchType.LAZY)
-    @JoinColumn(name = "conversation_id", foreignKey = @ForeignKey(name = "fk_stream_events_conversation"))
-    private Conversation conversation;
+    @Column("CONVERSATION_ID")
+    private String conversationId;
 
-    @Column(name = "run_id", length = 120)
+    @Column("RUN_ID")
     private String runId; // nullable
 
-    @Column(name = "event_type", length = 120)
+    @Column("EVENT_TYPE")
     private String eventType; // nullable
 
-    @Lob
-    @Column(name = "payload_json_clob", nullable = false, columnDefinition = "CLOB")
+    @Column("PAYLOAD_JSON_CLOB")
     private String payloadJsonClob;
 
-    @CreationTimestamp
-    @Column(name = "created_at", nullable = false, updatable = false)
+    @Column("CREATED_AT")
     private LocalDateTime createdAt;
+
+    @Transient
+    private boolean isNew = true;
+
+    @Override
+    public boolean isNew() {
+        return isNew || id == null;
+    }
+
+    public void setNew(boolean isNew) {
+        this.isNew = isNew;
+    }
 }

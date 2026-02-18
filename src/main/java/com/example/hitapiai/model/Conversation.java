@@ -1,47 +1,56 @@
 package com.example.hitapiai.model;
 
-import jakarta.persistence.*;
+import org.springframework.data.annotation.Id;
+import org.springframework.data.annotation.Transient;
+import org.springframework.data.domain.Persistable;
+import org.springframework.data.relational.core.mapping.Table;
+import org.springframework.data.relational.core.mapping.Column;
 import lombok.*;
-import org.hibernate.annotations.CreationTimestamp;
-import org.hibernate.annotations.UpdateTimestamp;
 
 import java.time.LocalDateTime;
 import java.util.List;
 
 @Getter @Setter
 @NoArgsConstructor @AllArgsConstructor
-@Entity
-@Table(
-        name = "conversations",
-        indexes = {
-                @Index(name = "idx_conversations_user", columnList = "user_id"),
-                @Index(name = "idx_conversations_updated", columnList = "updated_at")
-        }
-)
-public class Conversation {
+@Table("CONVERSATIONS")
+public class Conversation implements Persistable<String> {
 
     @Id
-    @Column(name = "conversation_id", nullable = false, length = 100)
+    @Column("CONVERSATION_ID")
     private String conversationId;
 
-    @ManyToOne(fetch = FetchType.LAZY, optional = false)
-    @JoinColumn(name = "user_id", nullable = false, foreignKey = @ForeignKey(name = "fk_conversations_user"))
-    private User user;
+    @Column("USER_ID")
+    private String userId;
 
-    @Column(name = "title", nullable = false, length = 200)
+    @Column("TITLE")
     private String title;
 
-    @OneToMany(mappedBy = "conversation", cascade = CascadeType.ALL, orphanRemoval = true)
+    @Transient
     private List<Message> messages;
 
-    @OneToMany(mappedBy = "conversation", cascade = CascadeType.ALL, orphanRemoval = true)
+    @Transient
     private List<StreamEvent> streamEvents;
 
-    @CreationTimestamp
-    @Column(name = "created_at", nullable = false, updatable = false)
+    @Column("CREATED_AT")
     private LocalDateTime createdAt;
 
-    @UpdateTimestamp
-    @Column(name = "updated_at", nullable = false)
+    @Column("UPDATED_AT")
     private LocalDateTime updatedAt;
+
+    @Transient
+    private boolean isNew = true;
+
+    @Override
+    public String getId() {
+        return conversationId;
+    }
+
+    @Override
+    public boolean isNew() {
+        return isNew;
+    }
+
+    public void setNew(boolean isNew) {
+        this.isNew = isNew;
+    }
 }

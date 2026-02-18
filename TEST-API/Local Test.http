@@ -9,7 +9,7 @@ Accept: text/event-stream
         "content": [
           {
             "type": "text",
-            "text": "Apakah BNI Diva dapat membantu saya dalam proses dalam memahami BNI?"
+            "text": "Aplikasi apakah ini?"
           }
         ],
         "additional_kwargs": {},
@@ -21,7 +21,7 @@ Accept: text/event-stream
       }
     ],
     "user_id": "USERCISO",
-    "session_id": "",
+    "session_id": "94c55661-db0d-4cb5-9a32-d4f204efffd4",
     "divisi_type": "divisi"
   }
 }
